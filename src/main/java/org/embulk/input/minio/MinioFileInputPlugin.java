@@ -59,7 +59,7 @@ public class MinioFileInputPlugin
 
         @Config("access_key_id")
         @ConfigDefault("null")
-        public Optional<String> getAccessKeyId();
+        public String getAccessKeyId();
 
         @Config("incremental")
         @ConfigDefault("true")
@@ -110,7 +110,7 @@ public class MinioFileInputPlugin
     @Override
     public ConfigDiff transaction(ConfigSource config, FileInputPlugin.Control control)
     {
-        PluginTask task = config.loadConfig(PluginTask.class());
+        PluginTask task = config.loadConfig(PluginTask.class);
 
         // list files recursively
         task.setFiles(listFiles(task));
@@ -125,7 +125,7 @@ public class MinioFileInputPlugin
             int taskCount,
             FileInputPlugin.Control control)
     {
-        PluginTask task = taskSource.loadTask(PluginTask.class());
+        PluginTask task = taskSource.loadTask(PluginTask.class);
 
         // validate task
         newMinioClient(task);
@@ -151,9 +151,17 @@ public class MinioFileInputPlugin
     }
 
     protected MinioClient newMinioClient(PluginTask task)
-            throws InvalidEndpointException,InvalidPortException
+            throws ConfigException
     {
-        return new MinioClient(task.getEndpoint(),task.getAccessKeyId(),task.getSecretAccessKey());
+
+        MinioClient client;
+        try {
+            client = new MinioClient(task.getEndpoint(),task.getAccessKeyId(),task.getSecretAccessKey());
+        }
+        catch (InvalidEndpointException|InvalidPortException e) {
+            throw new ConfigException("Can't create client " + e);
+        }
+        return client;
     }
 
 
@@ -190,14 +198,19 @@ public class MinioFileInputPlugin
         Iterable<Result<Item>> myObjects;
         client.listObjects(bucketName,prefix,true);
         for (Result<Item> result : myObjects) {
-            Item item = result.get();
-            if( item.size() > 0 )
-            {
-                builder.add(item.objectName(),item.size());
-                // TODO last path
-                if (!builder.needsMore()) {
-                    return;
+            try {
+                Item item = result.get();
+                if( item.size() > 0 )
+                {
+                    builder.add(item.objectName(),item.size());
+                    // TODO last path
+                    if (!builder.needsMore()) {
+                        return;
+                    }
                 }
+
+            } catch (Exception e) {
+                throw new ConfigException("ppp" + e);
             }
         }
     }
@@ -205,7 +218,7 @@ public class MinioFileInputPlugin
     @Override
     public TransactionalFileInput open(TaskSource taskSource, int taskIndex)
     {
-        PluginTask task = taskSource.loadTask(PluginTask.class());
+        PluginTask task = taskSource.loadTask(PluginTask.class);
         return new MinioInput(task, taskIndex);
     }
 
@@ -218,12 +231,14 @@ public class MinioFileInputPlugin
         private final MinioClient client;
         private final long contentLength;
         private final String path;
+        private final String bucket;
 
-        public S3InputStreamReopener(MinioClient client, String path, long contentLength)
+        public S3InputStreamReopener(MinioClient client, String bucket,String path, long contentLength)
         {
             this.client = client;
             this.path = path;
             this.contentLength = contentLength;
+            this.bucket = bucket;
         }
 
         @Override
@@ -239,8 +254,11 @@ public class MinioFileInputPlugin
                             public InputStream call() throws InterruptedIOException
                             {
                                 log.warn(String.format("S3 read failed. Retrying GET request with %,d bytes offset", offset), closedCause);
-                                request.setRange(offset, contentLength - 1);  // [first, last]
-                                return client.getObject(request).getObjectContent();
+                                try {
+                                    return client.getObject(bucket, path, offset - 1);
+                                } catch (Exception e){
+                                    throw new ConfigException("eeee");
+                                }
                             }
 
                             @Override
@@ -318,10 +336,16 @@ public class MinioFileInputPlugin
             if (!iterator.hasNext()) {
                 return null;
             }
-            String name = iterator.next();
-            ObjectStat stat = client.statObject(bucket,name);
-            InputStream stream = client.getObject(bucket, iterator.next());
-            return new ResumableInputStream(stream, new S3InputStreamReopener(client, name, stat.length()));
+
+            try {
+                String name = iterator.next();
+                ObjectStat stat = client.statObject(bucket, name);
+                InputStream stream = client.getObject(bucket, iterator.next());
+                return new ResumableInputStream(stream, new S3InputStreamReopener(client, bucket, name, stat.length()));
+            } catch (Exception e) {
+                throw new ConfigException("error "+ e);
+
+            }
         }
 
         @Override
